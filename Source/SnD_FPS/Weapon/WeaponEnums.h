@@ -1,0 +1,55 @@
+// WeaponEnums.h
+#pragma once
+
+#include "CoreMinimal.h"
+#include "WeaponEnums.generated.h"
+
+// Enum to define our specific inventory slots
+UENUM(BlueprintType)
+enum class EWeaponSlot : uint8
+{
+	Melee		UMETA(DisplayName = "Melee"),
+	Sidearm		UMETA(DisplayName = "Sidearm"),
+	Primary		UMETA(DisplayName = "Primary"),
+	None		UMETA(DisplayName = "None")
+};
+
+// --- NEW ADDITIONS FOR FIRE MODES ---
+UENUM(BlueprintType)
+enum class EFireMode : uint8
+{
+	Single		UMETA(DisplayName = "Single Fire"),
+	Burst		UMETA(DisplayName = "Burst Fire"),
+	Automatic	UMETA(DisplayName = "Automatic")
+};
+
+// --- NEW ADDITIONS FOR WEAPON TYPES ---
+UENUM(BlueprintType)
+enum class EWeaponType : uint8
+{
+	Melee		UMETA(DisplayName = "Melee"),
+	Sidearm		UMETA(DisplayName = "Pistol"),
+	SMG			UMETA(DisplayName = "SMG"),
+	Shotgun		UMETA(DisplayName = "Shotgun"),
+	Rifle		UMETA(DisplayName = "Assault Rifle"),
+	Sniper		UMETA(DisplayName = "Sniper Rifle")
+};
+
+// --- NEW STRUCT FOR EDITOR CONFIGURATION ---
+USTRUCT(BlueprintType)
+struct FWeaponFireConfig
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditDefaultsOnly, Category = "Fire Mode")
+	bool bCanSingle = true;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Fire Mode")
+	bool bCanBurst = false;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Fire Mode")
+	bool bCanAuto = true;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Fire Mode")
+	int32 BurstCount = 3;
+};
