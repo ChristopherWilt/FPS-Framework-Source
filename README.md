@@ -2,7 +2,7 @@
 Modular C++ FPS Framework for Unreal Engine 5. Implements Epic Online Services (EOS) for P2P matchmaking, client-side prediction, and a replicated weapon/animation state machine. (Source only).
 
 
-# Multiplayer FPS Framework (Source Code)
+# Multiplayer FPS Framework (Source Code - Work In Progress)
 
 **Role:** Systems Engineer / Solo Developer
 **Engine:** Unreal Engine 5.4
