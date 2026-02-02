@@ -5,7 +5,9 @@ Modular C++ FPS Framework for Unreal Engine 5. Implements Epic Online Services (
 # Multiplayer FPS Framework (Source Code - Work In Progress)
 
 **Role:** Systems Engineer / Solo Developer
+
 **Engine:** Unreal Engine 5.4
+
 **Language:** C++
 
 ## Overview
