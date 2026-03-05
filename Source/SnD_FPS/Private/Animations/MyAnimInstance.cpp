@@ -39,6 +39,7 @@ void UMyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	bIsInAir = PlayerCharacter->GetCharacterMovement()->IsFalling();
 	bIsCrouching = PlayerCharacter->IsCrouching();
 	bIsSliding = PlayerCharacter->bIsSliding;
+	PlayerCharacter->GetisAiming(bIsAiming);
 
 	// --------------------------------------------------------
 	// 2. WEAPON STATE (Using Helper)
@@ -57,6 +58,34 @@ void UMyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		CurrentIdleAnimation = nullptr;
 	}
 
+	// --- IK LOGIC ---
+
+	// 1. Determine if we should use IK (Not melee, and we have a valid weapon)
+	bool bUseIK = CurrentWeapon && CurrentWeapon->WeaponType != EWeaponType::Melee && !PlayerCharacter->IsActionHappening();
+
+	IKLeftHandAlpha = FMath::FInterpTo(IKLeftHandAlpha, bUseIK ? 1.0f : 0.0f, DeltaSeconds, 10.0f);
+
+	if (bUseIK && PlayerCharacter)
+	{
+		// 2. Find out which mesh we are animating (1P or 3P?)
+		USkeletalMeshComponent* OwningMesh = GetOwningComponent();
+		bool bIsFirstPerson = (OwningMesh == PlayerCharacter->GetFirstPersonMesh());
+
+		// 3. Get the correct Weapon Mesh (1P weapon for 1P view, 3P weapon for 3P view)
+		UStaticMeshComponent* TargetWeaponMesh = bIsFirstPerson ? CurrentWeapon->GetFirstPersonMesh() : CurrentWeapon->GetThirdPersonMesh();
+
+		if (TargetWeaponMesh)
+		{
+			// 4. Get Socket Transform in World Space
+			// MAKE SURE YOUR WEAPON MESH HAS A SOCKET NAMED "LeftHandSocket"
+			FTransform SocketTransform = TargetWeaponMesh->GetSocketTransform(FName("LeftHandSocket"), RTS_World);
+
+			// 5. Convert to Component Space (Relative to the Character Mesh) for the AnimGraph
+			FTransform MeshTransform = OwningMesh->GetComponentTransform();
+			IKLeftHandTransform = SocketTransform.GetRelativeTransform(MeshTransform);
+		}
+	}
+
 	// --------------------------------------------------------
 	// 3. AIM OFFSETS
 	// --------------------------------------------------------
@@ -66,6 +95,13 @@ void UMyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 	AimPitch = Delta.Pitch;
 	AimYaw = Delta.Yaw;
+
+	if (PlayerCharacter && PlayerCharacter->GetRecoilComponent())
+	{
+		// We override this to Identity (Zero) because the PlayerCharacter.cpp 
+		// now handles all Visual Recoil perfectly in pure Camera Space!
+		VisualRecoilTransform = FTransform::Identity;
+	}
 }
 
 // (Restored Helper Implementation)

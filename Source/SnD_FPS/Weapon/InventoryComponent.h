@@ -49,6 +49,9 @@ public:
 	UFUNCTION(BlueprintPure)
 	AWeapon* GetCurrentWeapon() const { return CurrentWeapon; }
 
+	UFUNCTION(Server, Reliable)
+	void Server_PickupWeapon(AWeapon* NewWeapon);
+
 protected:
 	virtual void BeginPlay() override;
 
@@ -83,6 +86,10 @@ protected:
 	EWeaponSlot CurrentSlot;
 
 	// --- CONFIGURATION ---
+
+	/** If true, weapons will always replace the currently held Primary/Secondary weapon, allowing any combo (e.g., 2 Pistols or 2 Rifles). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Settings")
+	bool bUniversalWeaponSlots = false;
 
 	/** The default melee weapon class to spawn with. */
 	UPROPERTY(EditDefaultsOnly, Category = "Weapon")

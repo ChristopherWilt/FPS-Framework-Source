@@ -1,10 +1,9 @@
-// WeaponEnums.h
 #pragma once
 
 #include "CoreMinimal.h"
 #include "WeaponEnums.generated.h"
 
-// Enum to define our specific inventory slots
+// --- EXISTING ENUMS ---
 UENUM(BlueprintType)
 enum class EWeaponSlot : uint8
 {
@@ -14,7 +13,6 @@ enum class EWeaponSlot : uint8
 	None		UMETA(DisplayName = "None")
 };
 
-// --- NEW ADDITIONS FOR FIRE MODES ---
 UENUM(BlueprintType)
 enum class EFireMode : uint8
 {
@@ -23,7 +21,6 @@ enum class EFireMode : uint8
 	Automatic	UMETA(DisplayName = "Automatic")
 };
 
-// --- NEW ADDITIONS FOR WEAPON TYPES ---
 UENUM(BlueprintType)
 enum class EWeaponType : uint8
 {
@@ -35,7 +32,14 @@ enum class EWeaponType : uint8
 	Sniper		UMETA(DisplayName = "Sniper Rifle")
 };
 
-// --- NEW STRUCT FOR EDITOR CONFIGURATION ---
+// --- RECOIL SYSTEM ENUM ---
+UENUM(BlueprintType)
+enum class ERecoilSystem : uint8
+{
+	Procedural  UMETA(DisplayName = "Procedural (CoD Style)"),
+	Pattern     UMETA(DisplayName = "Pattern (Valorant/CS Style)")
+};
+
 USTRUCT(BlueprintType)
 struct FWeaponFireConfig
 {

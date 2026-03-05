@@ -1,6 +1,13 @@
 #include "SnD_FPS/Player/PlayerCharacter.h"
 #include "SnD_FPS/Weapon/Weapon.h"
 #include "SnD_FPS/UI/BuySystem/WeaponBuyMenuWidget.h"
+#include "SnD_FPS/UI/Player/ModularPlayerHUD.h"
+#include "SnD_FPS/UI/Player/CrosshairWidget.h"
+#include "SnD_FPS/UI/Player/CompassWidget.h"
+#include "SnD_FPS/UI/Player/WeaponInventoryWidget.h"
+#include "SnD_FPS/UI/Player/KillfeedWidget.h"
+#include "SnD_FPS/UI/Player/MinimapWidget.h"
+#include "SnD_FPS/UI/Player/InteractPromptWidget.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -13,55 +20,47 @@
 #include "SnD_FPS/Weapon/InventoryComponent.h"
 #include "Animation/AnimInstance.h"
 #include "Kismet/GameplayStatics.h"
-#include "DrawDebugHelpers.h"
+#include "Engine/DamageEvents.h"
+#include "GameFramework/PlayerState.h"
 
 APlayerCharacter::APlayerCharacter()
 {
 	PrimaryActorTick.bCanEverTick = true;
 
-	// --- HEALTH & MONEY INIT ---
 	MaxHealth = 100.0f;
 	CurrentHealth = MaxHealth;
 	StartingMoney = 800;
 	CurrentMoney = StartingMoney;
 
 	InventoryComponent = CreateDefaultSubobject<UInventoryComponent>(TEXT("InventoryComponent"));
+	RecoilComp = CreateDefaultSubobject<URecoilComponent>(TEXT("RecoilComponent"));
 
-	// --- MOVEMENT INIT ---
 	GetCharacterMovement()->bOrientRotationToMovement = false;
-	GetCharacterMovement()->bUseControllerDesiredRotation = true; // Better for FPS
+	GetCharacterMovement()->bUseControllerDesiredRotation = true;
 
-	// --- CAMERA INIT ---
 	SpringArmComponent = CreateDefaultSubobject<USpringArmComponent>(TEXT("SpringArm"));
 	SpringArmComponent->SetupAttachment(GetCapsuleComponent());
 	SpringArmComponent->bUsePawnControlRotation = true;
-	SpringArmComponent->SetRelativeLocation(FVector(-15.0f, 0.0f, 74.0f)); // Your specific offset
+	SpringArmComponent->SetRelativeLocation(FVector(-15.0f, 0.0f, 74.0f));
 
 	CameraComponent = CreateDefaultSubobject<UCameraComponent>(TEXT("PlayerCamera"));
 	CameraComponent->SetupAttachment(SpringArmComponent);
 	CameraComponent->bUsePawnControlRotation = false;
 	CameraComponent->FieldOfView = DefaultFOV;
 
-	// --- MESH INIT ---
 	GetMesh()->bCastDynamicShadow = true;
-	GetMesh()->CastShadow = true;
 	GetMesh()->SetRelativeLocation(FVector(0.f, 0.f, -96.0f));
 	GetMesh()->SetRelativeRotation(FRotator(0.f, -90.0f, 0.f));
-	GetMesh()->SetOwnerNoSee(true);
 
 	FirstPersonMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("FirstPersonMesh"));
 	FirstPersonMesh->SetupAttachment(CameraComponent);
-	FirstPersonMesh->bCastHiddenShadow = false;
-	FirstPersonMesh->CastShadow = false;
-	FirstPersonMesh->SetRelativeLocation(FVector(15.f, 0.f, -150.f));
-	FirstPersonMesh->SetRelativeRotation(FRotator(0.0f, -90.0f, 0.0f));
-	FirstPersonMesh->SetOnlyOwnerSee(true);
+
+	SetMeshVisibility();
 }
 
 void APlayerCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
-	// --- ALL REPLICATED VARIABLES ---
 	DOREPLIFETIME(APlayerCharacter, CurrentHealth);
 	DOREPLIFETIME(APlayerCharacter, CurrentMoney);
 	DOREPLIFETIME(APlayerCharacter, bIsCrouching);
@@ -80,33 +79,208 @@ void APlayerCharacter::BeginPlay()
 			Subsystem->AddMappingContext(DefaultMappingContext, 0);
 		}
 	}
-	if (IsLocallyControlled()) FirstPersonMesh->SetCastShadow(true);
-	if (HasAuthority()) InventoryComponent->InitializeInventory();
+	SetMeshVisibility();
 
-	// Store the default movement values set in Blueprint
+	// --- NEW: SPAWN THE MASTER HUD ---
+	if (IsLocallyControlled() && MasterHUDClass)
+	{
+		MasterHUD = CreateWidget<UModularPlayerHUD>(Cast<APlayerController>(Controller), MasterHUDClass);
+		if (MasterHUD)
+		{
+			MasterHUD->AddToViewport();
+
+			// --- APPLY INITIAL MINIMAP SETTINGS ---
+			if (MasterHUD->Minimap)
+			{
+				MasterHUD->Minimap->ApplyMinimapSettings(CurrentMinimapConfig);
+			}
+		}
+	}
+
 	DefaultGroundFriction = GetCharacterMovement()->GroundFriction;
 	DefaultBrakingDeceleration = GetCharacterMovement()->BrakingDecelerationWalking;
-
 	GetCharacterMovement()->MaxWalkSpeedCrouched = CrouchSpeed;
+
+	// CAPTURE THE BLUEPRINT'S CUSTOM ARM POSITION
+	if (FirstPersonMesh)
+	{
+		DefaultArmsLocation = FirstPersonMesh->GetRelativeLocation();
+		DefaultArmsRotation = FirstPersonMesh->GetRelativeRotation();
+
+		CurrentBaseArmsLocation = DefaultArmsLocation;
+		CurrentBaseArmsRotation = DefaultArmsRotation;
+	}
+
+	if (HasAuthority()) InventoryComponent->InitializeInventory();
 }
 
 void APlayerCharacter::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
-	// 1P Attachment Fix
-	if (IsLocallyControlled() && InventoryComponent && InventoryComponent->GetCurrentWeapon())
+
+	CheckForInteractables();
+
+	// --- NEW: FEED CROSSHAIR DATA ---
+	if (IsLocallyControlled() && MasterHUD && MasterHUD->Crosshair)
 	{
-		AWeapon* Weap = InventoryComponent->GetCurrentWeapon();
-		if (Weap)
+		float SpeedSpread = (GetVelocity().Size() / RunSpeed) * 15.0f;
+		float FireSpread = bIsTriggerHeld ? 10.0f : 0.0f;
+		float TotalSpread = SpeedSpread + FireSpread;
+		MasterHUD->Crosshair->ApplyCrosshairConfig(CurrentCrosshairConfig, TotalSpread);
+	}
+
+	// --- FEED INVENTORY HUD DATA ---
+	if (IsLocallyControlled() && MasterHUD && MasterHUD->WeaponInventory && InventoryComponent)
+	{
+		if (AWeapon* CurrentWeapon = InventoryComponent->GetCurrentWeapon())
 		{
-			USceneComponent* WeaponRoot = Weap->GetRootComponent();
-			if (WeaponRoot && WeaponRoot->GetAttachParent() != FirstPersonMesh)
-			{
-				WeaponRoot->AttachToComponent(FirstPersonMesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale, TEXT("WeaponSocket"));
-				WeaponRoot->SetRelativeLocationAndRotation(Weap->AttachmentOffset, Weap->AttachmentRotation);
-			}
+			// 1. Update Ammo
+			MasterHUD->WeaponInventory->UpdateAmmo(CurrentWeapon->GetCurrentMagAmmo(), CurrentWeapon->GetCurrentReserveAmmo());
+
+			// 2. Update Fire Mode
+			FWeaponFireConfig FC = CurrentWeapon->GetFireConfig();
+			MasterHUD->WeaponInventory->UpdateFireMode(CurrentWeapon->GetCurrentFireMode(), FC.bCanSingle, FC.bCanBurst, FC.bCanAuto);
+
+			// 3. Update Icons 
+			MasterHUD->WeaponInventory->UpdateWeaponIcons(CurrentWeapon->WeaponIcon, nullptr, nullptr, nullptr);
 		}
 	}
+
+	// --- FEED COMPASS DATA ---
+	if (IsLocallyControlled() && MasterHUD && MasterHUD->Compass)
+	{
+		float RawYaw = CameraComponent->GetComponentRotation().Yaw;
+
+		// 1. Math for the sliding strip (Normalized to strictly -180 to 180)
+		FRotator NormRot = FRotator(0, RawYaw, 0);
+		NormRot.Normalize();
+		float StripYaw = NormRot.Yaw;
+
+		// 2. Math for the Center Text (Strictly 0 to 359)
+		int32 DisplayYaw = FMath::RoundToInt(RawYaw) % 360;
+		if (DisplayYaw < 0) DisplayYaw += 360;
+
+		// Placeholder location (You can hook this up to Trigger Volumes later!)
+		FString CurrentLocation = TEXT("STREET (WEST)");
+
+		MasterHUD->Compass->UpdateCompass(StripYaw, DisplayYaw, CurrentLocation);
+	}
+
+	// --- FEED MINIMAP DATA ---
+	if (IsLocallyControlled() && MasterHUD && MasterHUD->Minimap)
+	{
+		// 1. Get X and Y location of the player
+		FVector2D PlayerLoc(GetActorLocation().X, GetActorLocation().Y);
+
+		// 2. Get Camera Yaw so the map rotates when we look around
+		float PlayerYaw = CameraComponent->GetComponentRotation().Yaw;
+
+		// 3. Send Location, Yaw, and dynamic FOV to the Minimap
+		MasterHUD->Minimap->UpdateMinimap(PlayerLoc, PlayerYaw, CameraComponent->FieldOfView);
+	}
+
+	// =========================================================================
+	// PROCEDURAL ARMS ALIGNMENT & RECOIL (ADS SYSTEM)
+	// =========================================================================
+	if (IsLocallyControlled() && InventoryComponent)
+	{
+		AWeapon* Weapon = InventoryComponent->GetCurrentWeapon();
+		if (Weapon && Weapon->GetFirstPersonMesh())
+		{
+			// 1. INTERPOLATE CAMERA FOV
+			float TargetFOV = bIsAiming ? Weapon->AimFOV : DefaultFOV;
+			if (CameraComponent)
+			{
+				float NewFOV = FMath::FInterpTo(CameraComponent->FieldOfView, TargetFOV, DeltaTime, Weapon->AimSpeed);
+				CameraComponent->SetFieldOfView(NewFOV);
+			}
+
+			// 2. DETERMINE TARGET ARMS LOCATION (Pure Absolute Targets Now)
+			FVector TargetArmsLocation = DefaultArmsLocation;
+			FRotator TargetArmsRotation = DefaultArmsRotation;
+
+			if (bIsAiming)
+			{
+				// No more "+=". We use the exact, perfect absolute coordinates.
+				TargetArmsLocation = Weapon->ADSOffset;
+				TargetArmsRotation = Weapon->ADSRotation;
+			}
+
+			// 3. SMOOTH PROCEDURAL TRANSITION (This creates the Call of Duty glide)
+			CurrentBaseArmsLocation = FMath::VInterpTo(CurrentBaseArmsLocation, TargetArmsLocation, DeltaTime, Weapon->AimSpeed);
+			CurrentBaseArmsRotation = FMath::RInterpTo(CurrentBaseArmsRotation, TargetArmsRotation, DeltaTime, Weapon->AimSpeed);
+
+			// 4. APPLY VISUAL RECOIL IN PURE CAMERA SPACE
+			FVector FinalLoc = CurrentBaseArmsLocation;
+			FRotator FinalRot = CurrentBaseArmsRotation;
+
+			if (RecoilComp)
+			{
+				FTransform VisualRecoil = RecoilComp->GetCurrentVisualRecoil();
+				FVector RecoilLoc = VisualRecoil.GetLocation();
+				FRotator RecoilRot = VisualRecoil.Rotator();
+
+				if (bIsAiming)
+				{
+					RecoilRot.Pitch *= 0.02f;
+					RecoilRot.Yaw *= 0.02f;
+				}
+
+				FinalLoc += RecoilLoc;
+				FinalRot += RecoilRot;
+			}
+
+			FirstPersonMesh->SetRelativeLocationAndRotation(FinalLoc, FinalRot);
+		}
+	}
+}
+
+// =========================================================================
+// THE AAA AUTO-CALIBRATOR (Runs Automatically On Equip!)
+// =========================================================================
+void APlayerCharacter::CalculateWeaponADS(AWeapon* Weapon)
+{
+	if (!Weapon || !Weapon->GetFirstPersonMesh()) return;
+
+	// 1. FREEZE TIME
+	FVector TempLoc = FirstPersonMesh->GetRelativeLocation();
+	FRotator TempRot = FirstPersonMesh->GetRelativeRotation();
+
+	FirstPersonMesh->SetRelativeLocationAndRotation(DefaultArmsLocation, DefaultArmsRotation);
+	FirstPersonMesh->UpdateComponentToWorld(EUpdateTransformFlags::SkipPhysicsUpdate, ETeleportType::TeleportPhysics);
+	Weapon->GetFirstPersonMesh()->UpdateComponentToWorld(EUpdateTransformFlags::SkipPhysicsUpdate, ETeleportType::TeleportPhysics);
+	if (Weapon->AttachedOpticMesh) Weapon->AttachedOpticMesh->UpdateComponentToWorld(EUpdateTransformFlags::SkipPhysicsUpdate, ETeleportType::TeleportPhysics);
+
+	// 2. ROTATION (Parallel Barrel Alignment)
+	FVector BarrelForward = Weapon->GetFirstPersonMesh()->GetSocketRotation(FName("MuzzleSocket")).Vector();
+	FVector CamForward = CameraComponent->GetForwardVector();
+
+	FQuat DeltaRot = FQuat::FindBetweenNormals(BarrelForward, CamForward);
+	FQuat CurrentArmsQuat = FirstPersonMesh->GetComponentQuat();
+	FQuat TargetArmsQuat = DeltaRot * CurrentArmsQuat;
+
+	FQuat CamQuat = CameraComponent->GetComponentQuat();
+	FRotator TargetArmsLocalRot = (CamQuat.Inverse() * TargetArmsQuat).Rotator();
+
+	// NEW: Save the absolute rotation, avoiding gimbal lock addition.
+	Weapon->ADSRotation = TargetArmsLocalRot;
+
+	// 3. LOCATION (Sight Centering)
+	FVector SightLoc = Weapon->GetActiveSightSocketLocation();
+	FVector ArmsRootLoc = FirstPersonMesh->GetComponentLocation();
+
+	FVector LocalSightLoc = CurrentArmsQuat.Inverse().RotateVector(SightLoc - ArmsRootLoc);
+	FVector NewSightWorldLoc = ArmsRootLoc + TargetArmsQuat.RotateVector(LocalSightLoc);
+
+	FVector TargetWorldLoc = CameraComponent->GetComponentLocation() + (CamForward * 20.0f);
+	FVector WorldDiff = TargetWorldLoc - NewSightWorldLoc;
+	FVector LocalDiff = CameraComponent->GetComponentTransform().InverseTransformVectorNoScale(WorldDiff);
+
+	// NEW: Save the absolute location
+	Weapon->ADSOffset = DefaultArmsLocation + LocalDiff;
+
+	// 4. RESTORE TIME
+	FirstPersonMesh->SetRelativeLocationAndRotation(TempLoc, TempRot);
 }
 
 // =========================================================================
@@ -119,7 +293,7 @@ void APlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCom
 
 	if (UEnhancedInputComponent* EIC = Cast<UEnhancedInputComponent>(PlayerInputComponent))
 	{
-		// ---MOVEMENT ---
+		// --- MOVEMENT ---
 		EIC->BindAction(RunAction, ETriggerEvent::Started, this, &APlayerCharacter::StartRunning);
 		EIC->BindAction(RunAction, ETriggerEvent::Completed, this, &APlayerCharacter::StopRunning);
 		EIC->BindAction(CrouchAction, ETriggerEvent::Started, this, &APlayerCharacter::StartCrouching);
@@ -129,43 +303,44 @@ void APlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCom
 		EIC->BindAction(LookAction, ETriggerEvent::Triggered, this, &APlayerCharacter::Look);
 		EIC->BindAction(MoveAction, ETriggerEvent::Triggered, this, &APlayerCharacter::Move);
 
-		// --- NEW COMBAT ---
+		// --- COMBAT ---
 		EIC->BindAction(FireAction, ETriggerEvent::Started, this, &APlayerCharacter::StartFire);
 		EIC->BindAction(FireAction, ETriggerEvent::Completed, this, &APlayerCharacter::StopFire);
 		EIC->BindAction(ReloadAction, ETriggerEvent::Started, this, &APlayerCharacter::Reload);
 		EIC->BindAction(InspectAction, ETriggerEvent::Started, this, &APlayerCharacter::Inspect);
 		EIC->BindAction(FireModeAction, ETriggerEvent::Started, this, &APlayerCharacter::SwitchFireMode);
 
+		// --- INTERACTION ---
+		EIC->BindAction(InteractAction, ETriggerEvent::Started, this, &APlayerCharacter::Interact);
+
 		// --- UI/INVENTORY ---
 		EIC->BindAction(OpenBuyMenuAction, ETriggerEvent::Started, this, &APlayerCharacter::ToggleBuyMenu);
 		EIC->BindAction(EquipMeleeAction, ETriggerEvent::Started, this, &APlayerCharacter::EquipMelee);
 		EIC->BindAction(EquipSidearmAction, ETriggerEvent::Started, this, &APlayerCharacter::EquipSidearm);
 		EIC->BindAction(EquipPrimaryAction, ETriggerEvent::Started, this, &APlayerCharacter::EquipPrimary);
+
+		// ADS
+		if (ADSAction)
+		{
+			EIC->BindAction(ADSAction, ETriggerEvent::Started, this, &APlayerCharacter::StartADS);
+			EIC->BindAction(ADSAction, ETriggerEvent::Completed, this, &APlayerCharacter::StopADS);
+		}
 	}
 }
 
-
 void APlayerCharacter::Move(const FInputActionValue& Value)
 {
-	// input is a Vector2D (X = Side/Side, Y = Forward/Back)
 	FVector2D MovementVector = Value.Get<FVector2D>();
 
 	if (Controller != nullptr)
 	{
-		// Find out which way is forward
 		const FRotator Rotation = Controller->GetControlRotation();
 		const FRotator YawRotation(0, Rotation.Yaw, 0);
 
-		// Get forward vector
 		const FVector ForwardDirection = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::X);
-
-		// Get right vector
 		const FVector RightDirection = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::Y);
 
-		// Add movement (Y component of input is Forward/Back)
 		AddMovementInput(ForwardDirection, MovementVector.Y);
-
-		// Add movement (X component of input is Right/Left)
 		AddMovementInput(RightDirection, MovementVector.X);
 	}
 }
@@ -173,9 +348,17 @@ void APlayerCharacter::Move(const FInputActionValue& Value)
 void APlayerCharacter::Look(const FInputActionValue& Value)
 {
 	FVector2D LookAxisVector = Value.Get<FVector2D>();
+	float RawPitchInput = LookAxisVector.Y * -1.0f;
+
+	if (RecoilComp)
+	{
+		RawPitchInput = RecoilComp->ApplyRecoilCompensation(RawPitchInput);
+	}
+
+	AddControllerPitchInput(RawPitchInput);
 	AddControllerYawInput(LookAxisVector.X);
-	AddControllerPitchInput(LookAxisVector.Y * -1.0f);
 }
+
 void APlayerCharacter::StartRunning()
 {
 	bWantsToRun = true;
@@ -204,7 +387,6 @@ void APlayerCharacter::Server_StopRunning_Implementation()
 
 void APlayerCharacter::StartCrouching()
 {
-	// Enforce slow speed LOCALLY
 	GetCharacterMovement()->MaxWalkSpeedCrouched = CrouchSpeed;
 	Crouch();
 	Server_StartCrouching();
@@ -216,7 +398,6 @@ void APlayerCharacter::Server_StartCrouching_Implementation()
 {
 	if (!bIsCrouching)
 	{
-		// Enforce slow speed ON SERVER
 		GetCharacterMovement()->MaxWalkSpeedCrouched = CrouchSpeed;
 		bIsCrouching = true;
 		Crouch();
@@ -225,7 +406,6 @@ void APlayerCharacter::Server_StartCrouching_Implementation()
 
 void APlayerCharacter::Server_StopCrouching_Implementation() { if (bIsCrouching) { bIsCrouching = false; UnCrouch(); } }
 
-// 1. INPUT HANDLER(Client Only)
 void APlayerCharacter::StartSliding()
 {
 	bool bCanSlide = !bIsSliding &&
@@ -234,37 +414,27 @@ void APlayerCharacter::StartSliding()
 
 	if (bCanSlide)
 	{
-		// A. Apply Locally immediately (Prediction)
 		ApplySlidePhysics();
-
-		// B. Tell Server to apply physics too (Fixes Jitter)
 		Server_StartSliding();
 
-		// C. Apply Impulse (Velocity)
 		FVector SlideDir = GetLastMovementInputVector().GetSafeNormal();
 		if (SlideDir.IsNearlyZero()) SlideDir = GetActorForwardVector();
 		GetCharacterMovement()->Launch(SlideDir * SlideImpulseAmount);
 
-		// D. Timer
 		GetWorldTimerManager().SetTimer(SlideTimerHandle, this, &APlayerCharacter::StopSliding, SlideDuration, false);
 	}
 }
 
-// 2. PHYSICS HELPER (Shared Logic)
 void APlayerCharacter::ApplySlidePhysics()
 {
 	bIsSliding = true;
 
-	// Make slippery
 	GetCharacterMovement()->GroundFriction = SlideFriction;
 	GetCharacterMovement()->BrakingDecelerationWalking = SlideBrakingDeceleration;
-
-	// ALLOW FAST MOVEMENT IN CROUCH HITBOX
 	GetCharacterMovement()->MaxWalkSpeedCrouched = SlideSpeed;
 
-	Crouch(); // Shrink Hitbox
+	Crouch();
 
-	// Trigger Camera Shake (Client Only check inside)
 	if (IsLocallyControlled() && SlideCameraShakeClass)
 	{
 		if (APlayerController* PC = Cast<APlayerController>(GetController()))
@@ -274,23 +444,17 @@ void APlayerCharacter::ApplySlidePhysics()
 	}
 }
 
-// 3. SERVER RPC
 void APlayerCharacter::Server_StartSliding_Implementation()
 {
 	ApplySlidePhysics();
 }
 
-// 4. STOP HANDLER (Client Only - Driven by Timer)
 void APlayerCharacter::StopSliding()
 {
 	if (bIsSliding)
 	{
-		// A. Reset Locally
 		ResetSlidePhysics();
-
-		// B. Reset on Server
 		Server_StopSliding();
-
 		GetWorldTimerManager().ClearTimer(SlideTimerHandle);
 	}
 }
@@ -299,17 +463,12 @@ void APlayerCharacter::ResetSlidePhysics()
 {
 	bIsSliding = false;
 
-	// Restore Grip
 	GetCharacterMovement()->GroundFriction = DefaultGroundFriction;
 	GetCharacterMovement()->BrakingDecelerationWalking = DefaultBrakingDeceleration;
-
-	// RESTORE SLOW CROUCH SPEED (Crucial Fix)
 	GetCharacterMovement()->MaxWalkSpeedCrouched = CrouchSpeed;
 
-	// Reset Hitbox
 	UnCrouch();
 
-	// Determine Speed based on synced bool
 	if (bWantsToRun)
 	{
 		GetCharacterMovement()->MaxWalkSpeed = RunSpeed;
@@ -320,7 +479,6 @@ void APlayerCharacter::ResetSlidePhysics()
 	}
 }
 
-// 6. SERVER RPC
 void APlayerCharacter::Server_StopSliding_Implementation()
 {
 	ResetSlidePhysics();
@@ -328,9 +486,8 @@ void APlayerCharacter::Server_StopSliding_Implementation()
 
 void APlayerCharacter::CancelSlide() { if (bIsSliding) StopSliding(); }
 
-
 // =========================================================================
-// HEALTH & DAMAGE (Restored)
+// HEALTH & DAMAGE 
 // =========================================================================
 
 void APlayerCharacter::OnRep_CurrentHealth() { OnHealthUpdate(); }
@@ -352,6 +509,66 @@ float APlayerCharacter::TakeDamage(float DamageAmount, FDamageEvent const& Damag
 		float DamageToApply = Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
 		DamageToApply = FMath::Min(CurrentHealth, DamageToApply);
 		CurrentHealth -= DamageToApply;
+
+		// --- NEW: DEATH & KILLFEED LOGIC ---
+		if (CurrentHealth <= 0.0f)
+		{
+			// Drop weapon on death
+			if (InventoryComponent && InventoryComponent->GetCurrentWeapon())
+			{
+				InventoryComponent->GetCurrentWeapon()->DropWeapon();
+			}
+
+			FKillfeedData KillData;
+
+			// 1. GET THE VICTIM DATA
+			KillData.VictimPlayerState = GetPlayerState();
+			KillData.VictimName = KillData.VictimPlayerState ? KillData.VictimPlayerState->GetPlayerName() : GetName();
+
+			// 2. GET THE KILLER DATA & MATH
+			if (EventInstigator)
+			{
+				KillData.KillerPlayerState = EventInstigator->GetPlayerState<APlayerState>();
+				KillData.KillerName = KillData.KillerPlayerState ? KillData.KillerPlayerState->GetPlayerName() : EventInstigator->GetName();
+
+				// If the killer was another player character, calculate distance and No-Scope
+				if (APlayerCharacter* KillerChar = Cast<APlayerCharacter>(EventInstigator->GetPawn()))
+				{
+					// Convert Unreal Units (cm) to Meters
+					KillData.DistanceMeters = FVector::Distance(GetActorLocation(), KillerChar->GetActorLocation()) / 100.0f;
+
+					// Check if they were aiming using your Getter!
+					bool bWasAiming = false;
+					KillerChar->GetisAiming(bWasAiming);
+					KillData.bIsNoScope = !bWasAiming;
+				}
+			}
+
+			// 3. GET THE WEAPON DATA
+			if (AWeapon* Weapon = Cast<AWeapon>(DamageCauser))
+			{
+				KillData.WeaponIcon = Weapon->WeaponIcon;
+				KillData.bIsSniper = (Weapon->WeaponType == EWeaponType::Sniper);
+			}
+
+			// 4. CHECK FOR HEADSHOT
+			if (DamageEvent.IsOfType(FPointDamageEvent::ClassID))
+			{
+				const FPointDamageEvent* PointDamageEvent = (FPointDamageEvent*)&DamageEvent;
+
+				// Ensure this matches whatever you named the head bone in your Skeletal Mesh!
+				FName HitBone = PointDamageEvent->HitInfo.BoneName;
+				if (HitBone == "head" || HitBone == "Head" || HitBone == "neck")
+				{
+					KillData.bIsHeadshot = true;
+				}
+			}
+
+			// 5. BROADCAST TO ALL PLAYERS
+			Multicast_BroadcastKill(KillData);
+		}
+
+		// This handles your existing debug message and the Destroy() call
 		OnHealthUpdate();
 		return DamageToApply;
 	}
@@ -359,7 +576,7 @@ float APlayerCharacter::TakeDamage(float DamageAmount, FDamageEvent const& Damag
 }
 
 // =========================================================================
-// NEW: COMBAT SYSTEM
+// COMBAT SYSTEM
 // =========================================================================
 
 void APlayerCharacter::StartFire()
@@ -368,7 +585,6 @@ void APlayerCharacter::StartFire()
 	AWeapon* Weapon = InventoryComponent->GetCurrentWeapon();
 	if (!Weapon) return;
 
-	// Reload Cancel Check
 	if (bActionHappening)
 	{
 		if (Weapon->HasAmmo()) CancelAction();
@@ -393,38 +609,45 @@ void APlayerCharacter::StopFire()
 void APlayerCharacter::FireShot()
 {
 	AWeapon* Weapon = InventoryComponent->GetCurrentWeapon();
-	if (!Weapon || !Weapon->HasAmmo())
+	if (!Weapon || !Weapon->HasAmmo()) { StopFire(); return; }
+
+	if (UAnimSequence* FireAnim1P = Weapon->GetFireAnim1P()) PlayAnimOnMesh(FirstPersonMesh, FireAnim1P);
+	if (UAnimSequence* FireAnim3P = Weapon->GetFireAnim3P()) PlayAnimOnMesh(GetMesh(), FireAnim3P);
+
+	FVector TraceStart;
+	FRotator TraceRot;
+	GetController()->GetPlayerViewPoint(TraceStart, TraceRot);
+
+	if (RecoilComp)
 	{
-		StopFire();
-		return;
+		FRotator VisualSway = RecoilComp->GetCurrentVisualRecoil().Rotator();
+		TraceRot.Yaw += VisualSway.Yaw;
+		TraceRot.Pitch += VisualSway.Pitch;
 	}
 
-	// 1. Play Anim
-	if (UAnimSequence* FireAnim = Weapon->GetFireAnim1P()) PlayDynamicMontage(FireAnim, 0.05f, 1.0f);
-
-	// --- NEW: Calculate the Hit Point LOCALLY first ---
-	FVector TraceStart; FRotator TraceRot;
-	GetController()->GetPlayerViewPoint(TraceStart, TraceRot);
 	FVector TraceDir = TraceRot.Vector();
 	FVector TraceEnd = TraceStart + (TraceDir * Weapon->WeaponRange);
 
-	// Perform a quick trace to find where the crosshair is looking
 	FHitResult Hit;
 	FCollisionQueryParams Params;
 	Params.AddIgnoredActor(this);
 	Params.AddIgnoredActor(Weapon);
 
 	bool bDidHit = GetWorld()->LineTraceSingleByChannel(Hit, TraceStart, TraceEnd, ECC_Visibility, Params);
-	FVector TargetPoint = bDidHit ? Hit.Location : TraceEnd;
-	// --------------------------------------------------
+	if (!bDidHit)
+	{
+		Hit.TraceEnd = TraceEnd;
+		Hit.ImpactPoint = TraceEnd;
+	}
 
-	// 2. Pass the TargetPoint to the Weapon
-	Weapon->PlayFireEffects(TargetPoint);
+	if (IsLocallyControlled() && RecoilComp)
+	{
+		RecoilComp->Recoil_Fire(Weapon->RecoilData);
+	}
 
-	// 3. Server RPC (Send the same start/dir)
+	Weapon->PlayFireEffects(Hit);
 	Server_FireShot(TraceStart, TraceDir);
 
-	// 4. Loop Logic (Keep existing)
 	float Delay = 60.0f / Weapon->FireRate;
 	if (Weapon->GetCurrentFireMode() == EFireMode::Automatic && bIsTriggerHeld)
 		GetWorldTimerManager().SetTimer(FireTimerHandle, this, &APlayerCharacter::FireShot, Delay, false);
@@ -435,10 +658,7 @@ void APlayerCharacter::FireShot()
 	}
 }
 
-bool APlayerCharacter::Server_FireShot_Validate(FVector_NetQuantize TraceStart, FVector_NetQuantizeNormal TraceDir)
-{
-	return InventoryComponent->GetCurrentWeapon() && InventoryComponent->GetCurrentWeapon()->HasAmmo();
-}
+bool APlayerCharacter::Server_FireShot_Validate(FVector_NetQuantize TraceStart, FVector_NetQuantizeNormal TraceDir) { return true; }
 
 void APlayerCharacter::Server_FireShot_Implementation(FVector_NetQuantize TraceStart, FVector_NetQuantizeNormal TraceDir)
 {
@@ -449,13 +669,11 @@ void APlayerCharacter::Server_FireShot_Implementation(FVector_NetQuantize TraceS
 	{
 		if (bActionHappening) bActionHappening = false;
 
-		// 1. Play 3P Anim
 		if (UAnimSequence* FireAnim3P = Weapon->GetFireAnim3P())
 		{
 			Multicast_PlayDynamicMontage(FireAnim3P, 0.05f, 1.0f);
 		}
 
-		// 2. HITSCAN LOGIC
 		FVector End = TraceStart + (TraceDir * Weapon->WeaponRange);
 		FHitResult Hit;
 		FCollisionQueryParams Params;
@@ -463,18 +681,18 @@ void APlayerCharacter::Server_FireShot_Implementation(FVector_NetQuantize TraceS
 		Params.AddIgnoredActor(Weapon);
 
 		bool bDidHit = GetWorld()->LineTraceSingleByChannel(Hit, TraceStart, End, ECC_Visibility, Params);
+		if (!bDidHit)
+		{
+			Hit.TraceEnd = End;
+			Hit.ImpactPoint = End;
+		}
 
-		// 3. DETERMINE TARGET
-		FVector TargetPoint = bDidHit ? Hit.Location : End;
+		Weapon->PlayFireEffects(Hit);
 
-		// --- CHANGED: Tell Weapon to fire at the EXACT calculated hit point ---
-		// This ensures the Multicast tracer goes to the exact spot the server calculated
-		Weapon->PlayFireEffects(TargetPoint);
+		// --- TRIGGER MINIMAP RED DOT ---
+		// (Later, add a check here to see if the weapon has a silencer attachment)
+		Multicast_PingMinimap(this, GetActorLocation());
 
-		// Draw Debug Line (From previous request)
-		//DrawDebugLine(GetWorld(), TraceStart, TargetPoint, FColor::Red, false, 3.0f, 0, 1.0f);
-
-		// Apply Damage
 		if (bDidHit)
 		{
 			if (AActor* HitActor = Hit.GetActor())
@@ -491,11 +709,14 @@ void APlayerCharacter::Reload()
 	AWeapon* Weapon = InventoryComponent->GetCurrentWeapon();
 	if (!Weapon || !Weapon->CanReload()) return;
 
-	UAnimSequence* AnimToPlay = (Weapon->HasAmmo()) ? Weapon->GetReloadTacAnim() : Weapon->GetReloadDryAnim();
-	if (!AnimToPlay) return;
-
 	bActionHappening = true;
-	PlayDynamicMontage(AnimToPlay, 0.2f, 1.0f);
+
+	UAnimSequence* Anim1P = (Weapon->HasAmmo()) ? Weapon->GetReloadTacAnim() : Weapon->GetReloadDryAnim();
+	PlayAnimOnMesh(FirstPersonMesh, Anim1P);
+
+	UAnimSequence* Anim3P = (Weapon->HasAmmo()) ? Weapon->GetReloadTacAnim3P() : Weapon->GetReloadDryAnim3P();
+	PlayAnimOnMesh(GetMesh(), Anim3P);
+
 	Server_Reload();
 }
 
@@ -505,17 +726,35 @@ void APlayerCharacter::Server_Reload_Implementation()
 	AWeapon* Weapon = InventoryComponent->GetCurrentWeapon();
 	if (!Weapon) return;
 	bActionHappening = true;
-	UAnimSequence* AnimToPlay = (Weapon->HasAmmo()) ? Weapon->GetReloadTacAnim() : Weapon->GetReloadDryAnim();
-	Multicast_PlayDynamicMontage(AnimToPlay, 0.2f, 1.0f);
+
+	UAnimSequence* Anim3P = (Weapon->HasAmmo()) ? Weapon->GetReloadTacAnim3P() : Weapon->GetReloadDryAnim3P();
+	Multicast_PlayDynamicMontage(Anim3P, 0.2f, 1.0f);
 }
 
 void APlayerCharacter::Inspect()
 {
-	if (bActionHappening) return;
 	AWeapon* Weapon = InventoryComponent->GetCurrentWeapon();
 	if (!Weapon || !Weapon->GetInspectAnim()) return;
 	bActionHappening = true;
-	PlayDynamicMontage(Weapon->GetInspectAnim(), 0.3f, 1.0f);
+
+	PlayAnimOnMesh(FirstPersonMesh, Weapon->GetInspectAnim());
+	PlayAnimOnMesh(GetMesh(), Weapon->GetInspectAnim3P());
+
+	Server_Inspect();
+}
+
+bool APlayerCharacter::Server_Inspect_Validate() { return true; }
+void APlayerCharacter::Server_Inspect_Implementation()
+{
+	AWeapon* Weapon = InventoryComponent->GetCurrentWeapon();
+	if (!Weapon) return;
+
+	bActionHappening = true;
+
+	if (UAnimSequence* Anim3P = Weapon->GetInspectAnim3P())
+	{
+		Multicast_PlayDynamicMontage(Anim3P, 0.2f, 1.0f);
+	}
 }
 
 void APlayerCharacter::HandleAnimNotify(ENotifyActionType NotifyType)
@@ -553,7 +792,7 @@ void APlayerCharacter::PlayDynamicMontage(UAnimSequence* AnimSeq, float BlendTim
 
 void APlayerCharacter::Multicast_PlayDynamicMontage_Implementation(UAnimSequence* AnimSeq, float BlendTime, float PlayRate)
 {
-	if (!IsLocallyControlled()) PlayDynamicMontage(AnimSeq, BlendTime, PlayRate);
+	if (!IsLocallyControlled()) PlayAnimOnMesh(GetMesh(), AnimSeq);
 }
 
 // =========================================================================
@@ -562,25 +801,34 @@ void APlayerCharacter::Multicast_PlayDynamicMontage_Implementation(UAnimSequence
 
 void APlayerCharacter::AttachWeapon(AWeapon* WeaponToAttach, AWeapon* OldWeapon)
 {
-	// Hide/Detach Old
-	if (OldWeapon)
+	if (OldWeapon && !OldWeapon->bIsDropped)
 	{
 		OldWeapon->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
 		OldWeapon->SetActorHiddenInGame(true);
 		OldWeapon->SetActorEnableCollision(false);
 		if (OldWeapon->GetFirstPersonMesh()) OldWeapon->GetFirstPersonMesh()->SetCastShadow(false);
 	}
-	// Show/Attach New
 	if (WeaponToAttach)
 	{
 		WeaponToAttach->SetActorHiddenInGame(false);
 		WeaponToAttach->SetActorEnableCollision(true);
-		if (WeaponToAttach->GetFirstPersonMesh()) WeaponToAttach->GetFirstPersonMesh()->SetCastShadow(true);
 
-		USceneComponent* WeaponRoot = WeaponToAttach->GetRootComponent();
-		USkeletalMeshComponent* TargetMesh = IsLocallyControlled() ? FirstPersonMesh : GetMesh();
-		WeaponRoot->AttachToComponent(TargetMesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale, TEXT("WeaponSocket"));
-		WeaponRoot->SetRelativeLocationAndRotation(WeaponToAttach->AttachmentOffset, WeaponToAttach->AttachmentRotation);
+		SetWeaponVisibility(WeaponToAttach);
+
+		WeaponToAttach->AttachToComponent(GetMesh(), FAttachmentTransformRules::SnapToTargetNotIncludingScale, TEXT("WeaponSocket"));
+		WeaponToAttach->SetActorRelativeLocation(WeaponToAttach->AttachmentOffset);
+		WeaponToAttach->SetActorRelativeRotation(WeaponToAttach->AttachmentRotation);
+
+		if (IsLocallyControlled() && WeaponToAttach->GetFirstPersonMesh())
+		{
+			USceneComponent* WeaponMesh1P = WeaponToAttach->GetFirstPersonMesh();
+			WeaponMesh1P->AttachToComponent(FirstPersonMesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale, TEXT("WeaponSocket"));
+			WeaponMesh1P->SetRelativeLocation(WeaponToAttach->AttachmentOffset);
+			WeaponMesh1P->SetRelativeRotation(WeaponToAttach->AttachmentRotation);
+
+			// Reset the offset so the code knows to calibrate it the first time we aim!
+			WeaponToAttach->ADSOffset = FVector::ZeroVector;
+		}
 	}
 }
 
@@ -642,6 +890,7 @@ void APlayerCharacter::EquipMelee() { if (InventoryComponent) InventoryComponent
 void APlayerCharacter::EquipSidearm() { if (InventoryComponent) InventoryComponent->Server_EquipWeapon(EWeaponSlot::Sidearm); }
 void APlayerCharacter::EquipPrimary() { if (InventoryComponent) InventoryComponent->Server_EquipWeapon(EWeaponSlot::Primary); }
 
+
 void APlayerCharacter::SwitchFireMode() { Server_SwitchFireMode(); }
 void APlayerCharacter::Server_SwitchFireMode_Implementation()
 {
@@ -651,4 +900,174 @@ void APlayerCharacter::Server_SwitchFireMode_Implementation()
 FRotator APlayerCharacter::GetAimOffset() const
 {
 	return (GetControlRotation() - GetActorRotation()).GetNormalized();
+}
+
+// --- Helpers ---
+void APlayerCharacter::PlayAnimOnMesh(USkeletalMeshComponent* TargetMesh, UAnimSequence* Anim)
+{
+	if (TargetMesh && Anim)
+	{
+		if (UAnimInstance* AnimInst = TargetMesh->GetAnimInstance())
+		{
+			AnimInst->PlaySlotAnimationAsDynamicMontage(Anim, FName("DefaultSlot"), 0.2f, 0.2f, 1.0f);
+		}
+	}
+}
+
+void APlayerCharacter::SetMeshVisibility()
+{
+	if (GetMesh())
+	{
+		GetMesh()->SetOwnerNoSee(true);
+		GetMesh()->SetCastShadow(true);
+		GetMesh()->bCastHiddenShadow = true;
+	}
+
+	if (FirstPersonMesh)
+	{
+		FirstPersonMesh->SetOnlyOwnerSee(true);
+		FirstPersonMesh->SetCastShadow(false);
+		FirstPersonMesh->bCastHiddenShadow = false;
+	}
+}
+
+void APlayerCharacter::SetWeaponVisibility(AWeapon* WeaponToAttach)
+{
+	if (WeaponToAttach->GetFirstPersonMesh())
+	{
+		// --- THE FIX: Un-hide the 1P mesh when equipping! ---
+		WeaponToAttach->GetFirstPersonMesh()->SetHiddenInGame(false);
+
+		WeaponToAttach->GetFirstPersonMesh()->SetCastShadow(false);
+		WeaponToAttach->GetFirstPersonMesh()->bCastHiddenShadow = false;
+		WeaponToAttach->GetFirstPersonMesh()->SetOnlyOwnerSee(true);
+	}
+
+	if (WeaponToAttach->GetThirdPersonMesh())
+	{
+		WeaponToAttach->GetThirdPersonMesh()->SetCastShadow(true);
+		WeaponToAttach->GetThirdPersonMesh()->SetOwnerNoSee(true);
+		WeaponToAttach->GetThirdPersonMesh()->bCastHiddenShadow = true;
+	}
+}
+
+// =========================================================================
+// ADS SYSTEM
+// =========================================================================
+
+void APlayerCharacter::StartADS()
+{
+	bIsAiming = true;
+	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed * 0.5f;
+
+	// Just-In-Time Calibration!
+	if (InventoryComponent)
+	{
+		if (AWeapon* Weapon = InventoryComponent->GetCurrentWeapon())
+		{
+			// Only calculate if we haven't done it yet for this weapon
+			if (Weapon->ADSOffset.IsZero())
+			{
+				CalculateWeaponADS(Weapon);
+			}
+		}
+	}
+}
+
+void APlayerCharacter::StopADS()
+{
+	bIsAiming = false;
+	GetCharacterMovement()->MaxWalkSpeed = WalkSpeed;
+}
+
+void APlayerCharacter::Multicast_PingMinimap_Implementation(APlayerCharacter* Shooter, FVector PingLocation)
+{
+	// 1. If we are the ones shooting, don't show a ping on our own map.
+	if (IsLocallyControlled()) return;
+
+	// 2. Grab the LOCAL player's screen/HUD, not the enemy's body!
+	if (APlayerController* LocalPC = UGameplayStatics::GetPlayerController(GetWorld(), 0))
+	{
+		if (APlayerCharacter* LocalCharacter = Cast<APlayerCharacter>(LocalPC->GetPawn()))
+		{
+			if (LocalCharacter->MasterHUD && LocalCharacter->MasterHUD->Minimap)
+			{
+				LocalCharacter->MasterHUD->Minimap->SpawnEnemyPing(Shooter, PingLocation);
+			}
+		}
+	}
+}
+
+void APlayerCharacter::Multicast_BroadcastKill_Implementation(FKillfeedData KillData)
+{
+	if (APlayerController* LocalPC = UGameplayStatics::GetPlayerController(GetWorld(), 0))
+	{
+		if (APlayerCharacter* LocalCharacter = Cast<APlayerCharacter>(LocalPC->GetPawn()))
+		{
+			// Call your C++ function on the HUD's Killfeed!
+			if (LocalCharacter->MasterHUD && LocalCharacter->MasterHUD->Killfeed)
+			{
+				LocalCharacter->MasterHUD->Killfeed->AddKillMessage(KillData);
+			}
+		}
+	}
+}
+
+void APlayerCharacter::CheckForInteractables()
+{
+	if (!IsLocallyControlled()) return;
+
+	TArray<AActor*> OverlappedWeapons;
+	GetCapsuleComponent()->GetOverlappingActors(OverlappedWeapons, AWeapon::StaticClass());
+
+	AWeapon* BestWeapon = nullptr;
+	float BestScore = -1.0f;
+
+	FVector CamLoc = CameraComponent->GetComponentLocation();
+	FVector CamForward = CameraComponent->GetForwardVector();
+
+	for (AActor* Actor : OverlappedWeapons)
+	{
+		if (AWeapon* Weapon = Cast<AWeapon>(Actor))
+		{
+			if (Weapon->bIsDropped)
+			{
+				FVector DirToWeapon = (Weapon->GetActorLocation() - CamLoc).GetSafeNormal();
+				float LookScore = FVector::DotProduct(CamForward, DirToWeapon);
+
+				if (LookScore > 0.0f && LookScore > BestScore)
+				{
+					BestScore = LookScore;
+					BestWeapon = Weapon;
+				}
+			}
+		}
+	}
+
+	if (FocusedWeapon != BestWeapon)
+	{
+		FocusedWeapon = BestWeapon;
+
+		if (MasterHUD && MasterHUD->InteractPrompt)
+		{
+			if (FocusedWeapon) MasterHUD->InteractPrompt->ShowPrompt(FocusedWeapon);
+			else MasterHUD->InteractPrompt->HidePrompt();
+		}
+	}
+}
+
+void APlayerCharacter::Interact()
+{
+	if (FocusedWeapon)
+	{
+		Server_Interact(FocusedWeapon);
+	}
+}
+
+void APlayerCharacter::Server_Interact_Implementation(AWeapon* WeaponToPickup)
+{
+	if (InventoryComponent)
+	{
+		InventoryComponent->Server_PickupWeapon(WeaponToPickup);
+	}
 }

@@ -238,3 +238,39 @@ void UInventoryComponent::OnRep_CurrentWeapon(AWeapon* LastWeapon)
 		}
 	}
 }
+
+void UInventoryComponent::Server_PickupWeapon_Implementation(AWeapon* NewWeapon)
+{
+	if (!NewWeapon || !OwningPlayer || !NewWeapon->bIsDropped) return;
+
+	// 1. Determine default slot based purely on weapon type
+	EWeaponSlot TargetSlot = EWeaponSlot::Primary;
+	if (NewWeapon->WeaponType == EWeaponType::Sidearm)
+	{
+		TargetSlot = EWeaponSlot::Sidearm;
+	}
+
+	// --- THE UNIVERSAL MODULAR OVERRIDE ---
+	// If enabled, the weapon perfectly replaces whatever gun is currently in your hands!
+	// (If you are holding your melee weapon, it safely falls back to the default sorting above)
+	if (bUniversalWeaponSlots && (CurrentSlot == EWeaponSlot::Primary || CurrentSlot == EWeaponSlot::Sidearm))
+	{
+		TargetSlot = CurrentSlot;
+	}
+
+	// 2. Assign the pointer based on the final TargetSlot determination
+	AWeapon** WeaponPointer = (TargetSlot == EWeaponSlot::Primary) ? &PrimaryWeapon : &SidearmWeapon;
+
+	// 3. Drop current weapon in that slot
+	if (*WeaponPointer)
+	{
+		(*WeaponPointer)->DropWeapon();
+	}
+
+	// 4. Take new weapon
+	*WeaponPointer = NewWeapon;
+	NewWeapon->SetOwner(GetOwner());
+	NewWeapon->Multicast_PickupWeapon();
+
+	Server_EquipWeapon(TargetSlot);
+}

@@ -3,8 +3,10 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
 #include "InputActionValue.h"
-#include "SnD_FPS/Weapon/WeaponEnums.h" 
-#include "Animations/FPSAnimNotify.h" // Include the new Notify system
+#include "SnD_FPS/Weapon/WeaponEnums.h"
+#include "SnD_FPS/Weapon/RecoilComponent.h"
+#include "SnD_FPS/Public/Animations/FPSAnimNotify.h"
+#include "SnD_FPS/UI/Player/HUDEnums.h"
 #include "PlayerCharacter.generated.h"
 
 class UCameraComponent;
@@ -16,6 +18,7 @@ class USkeletalMeshComponent;
 class UWeaponBuyMenuWidget;
 class UInventoryComponent;
 class UAnimSequence;
+class UModularPlayerHUD;
 
 UCLASS()
 class SND_FPS_API APlayerCharacter : public ACharacter
@@ -31,14 +34,8 @@ public:
 	virtual void Tick(float DeltaTime) override;
 
 	// --- NEW: WEAPON & COMBAT SYSTEM ---
-
-	/** Client-side request to purchase a weapon. */
 	void RequestPurchaseWeapon(TSubclassOf<AWeapon> WeaponToBuy);
-
-	/** Attaches weapon meshes. Called on server and clients. */
 	void AttachWeapon(AWeapon* WeaponToAttach, AWeapon* OldWeapon);
-
-	/** Call this when inventory swaps weapons to cancel current reloads */
 	void OnWeaponSwapped();
 
 	// Input Handlers
@@ -58,16 +55,38 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Animation")
 	UAnimSequence* GetCurrentWeaponIdleAnimation() const;
 
-	/** Core function to play animations on every bullet */
 	void PlayDynamicMontage(UAnimSequence* AnimSeq, float BlendTime = 0.2f, float PlayRate = 1.0f);
 
 	FORCEINLINE USkeletalMeshComponent* GetFirstPersonMesh() const { return FirstPersonMesh; }
 	FORCEINLINE UInventoryComponent* GetInventoryComponent() const { return InventoryComponent; }
+	FORCEINLINE URecoilComponent* GetRecoilComponent() const { return RecoilComp; }
+
+	// =========================================================================
+	// ADS SYSTEM & AUTOMATION
+	// =========================================================================
+	void StartADS();
+	void StopADS();
+
+	/** Runs instantly the moment you equip a weapon to perfectly align the optic */
+	void CalculateWeaponADS(AWeapon* Weapon);
 
 protected:
 	virtual void BeginPlay() override;
 
-	// --- NEW: SERVER RPCs ---
+	// =========================================================================
+	// PROCEDURAL ARMS ALIGNMENT (The AAA ADS System)
+	// =========================================================================
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Procedural Arms")
+	FVector DefaultArmsLocation;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Procedural Arms")
+	FRotator DefaultArmsRotation;
+
+	FVector CurrentBaseArmsLocation;
+	FRotator CurrentBaseArmsRotation;
+
+	// --- SERVER RPCs ---
 	UFUNCTION(Server, Reliable, WithValidation)
 	void Server_PurchaseWeapon(TSubclassOf<AWeapon> WeaponClass);
 
@@ -83,7 +102,7 @@ protected:
 	UFUNCTION(NetMulticast, Unreliable)
 	void Multicast_PlayDynamicMontage(UAnimSequence* AnimSeq, float BlendTime, float PlayRate);
 
-	// --- HEALTH SYSTEM (Restored) ---
+	// --- HEALTH SYSTEM ---
 	UPROPERTY(EditDefaultsOnly, Category = "Health")
 	float MaxHealth;
 
@@ -118,19 +137,19 @@ protected:
 	UInputAction* FireAction;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
-	UInputAction* ReloadAction; // New
+	UInputAction* ReloadAction;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
-	UInputAction* InspectAction; // New
+	UInputAction* InspectAction;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
-	UInputAction* FireModeAction; // New
+	UInputAction* FireModeAction;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
 	UInputAction* LookAction;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
-	class UInputAction* MoveAction; // Logic for WASD
+	class UInputAction* MoveAction;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
 	UInputAction* OpenBuyMenuAction;
@@ -142,6 +161,12 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
 	UInputAction* EquipPrimaryAction;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
+	UInputAction* ADSAction;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
+	UInputAction* InteractAction;
+
 	// --- CAMERA ---
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Camera")
 	USpringArmComponent* SpringArmComponent;
@@ -149,9 +174,35 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera")
 	UCameraComponent* CameraComponent;
 
-	// --- UI ---
+	// ------- UI ---------
+	
+	// Buy Menu
 	UPROPERTY(EditDefaultsOnly, Category = "UI")
 	TSubclassOf<UWeaponBuyMenuWidget> BuyMenuWidgetClass;
+
+	// --- HUD Hook ---
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<class UModularPlayerHUD> MasterHUDClass;
+
+	UPROPERTY()
+	UModularPlayerHUD* MasterHUD;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UI|Settings")
+	FCrosshairConfig CurrentCrosshairConfig;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UI|Settings")
+	FMinimapConfig CurrentMinimapConfig;
+
+	// --- KILLFEED ---
+	UFUNCTION(NetMulticast, Reliable)
+	void Multicast_BroadcastKill(FKillfeedData KillData);
+
+	// --- MINIMAP PINGS ---
+	/** Call this when an enemy fires to show a red dot */
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_PingMinimap(APlayerCharacter* Shooter, FVector PingLocation);
+
+
 
 	// --- INVENTORY COMPONENT ---
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
@@ -185,7 +236,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement")
 	float DefaultFOV = 90;
 
-	// --- MONEY (Restored) ---
+	// --- MONEY ---
 	UFUNCTION(BlueprintPure, Category = "Player Stats")
 	int32 GetCurrentMoney() const { return CurrentMoney; }
 
@@ -194,8 +245,13 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Animation")
 	FRotator GetAimOffset() const;
 
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	URecoilComponent* RecoilComp;
+
+	void GetisAiming(bool& bAiming) const { bAiming = bIsAiming; }
+
 private:
-	// --- MOVEMENT FUNCTIONS (Restored) ---
+	// --- MOVEMENT FUNCTIONS ---
 	void Move(const FInputActionValue& Value);
 	void Look(const FInputActionValue& Value);
 	void StartRunning();
@@ -210,32 +266,46 @@ private:
 	void Server_StartRunning();
 	UFUNCTION(Server, Reliable)
 	void Server_StopRunning();
+
 	UFUNCTION(Server, Reliable)
 	void Server_StartCrouching();
 	UFUNCTION(Server, Reliable)
 	void Server_StopCrouching();
 
-	// --- NEW: SERVER SLIDE RPCS ---
 	UFUNCTION(Server, Reliable)
 	void Server_StartSliding();
 
 	UFUNCTION(Server, Reliable)
 	void Server_StopSliding();
 
-	// Helper functions to apply physics settings on both ends
+	UFUNCTION(Server, Unreliable, WithValidation)
+	void Server_Inspect();
+
 	void ApplySlidePhysics();
 	void ResetSlidePhysics();
 
 	UPROPERTY(Replicated)
 	bool bIsCrouching = false;
 
-	// --- INTERNAL COMBAT LOGIC (New) ---
+	// --- INTERACTION ---
+	UPROPERTY()
+	AWeapon* FocusedWeapon;
+
+	void CheckForInteractables();
+	void Interact();
+
+	UFUNCTION(Server, Reliable)
+	void Server_Interact(AWeapon* WeaponToPickup);
+
+	// --- INTERNAL COMBAT LOGIC ---
 	void FireShot();
 	void CancelAction();
 	void ResetActionState();
 
+	bool bIsAiming = false;
+
 	UPROPERTY(Replicated)
-	bool bActionHappening = false; // "True" if reloading/inspecting
+	bool bActionHappening = false;
 
 	bool bIsTriggerHeld = false;
 	FTimerHandle FireTimerHandle;
@@ -252,45 +322,33 @@ private:
 	void EquipPrimary();
 
 	bool bIsInBuyPhase = true;
-
-
-	// Movement Variables
 	float DefaultGroundFriction;
 	float DefaultBrakingDeceleration;
-
-	// Track if the player wants to run (Shift held) independent of sliding state
 	bool bWantsToRun = false;
 
 protected:
-	// --- MONEY VARS ---
 	UPROPERTY(EditDefaultsOnly, Category = "Player Stats")
 	int32 StartingMoney;
 
 	UPROPERTY(VisibleInstanceOnly, Replicated, Category = "Player Stats")
 	int32 CurrentMoney;
 
-
-	// --- CROUCHING ---
-
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement")
-	float CrouchSpeed = 300.f; // Normal slow crouch speed
+	float CrouchSpeed = 300.f;
 
-
-	// --- SLIDING CONFIGURATION ---
-
-	/** How slippery the ground is while sliding. 0 = Ice. CoD feel is around 0.1 - 0.2 */
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Sliding")
 	float SlideFriction = 0.1f;
 
-	/** How fast you slow down while sliding. Lower = longer slide. */
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Sliding")
-	float SlideBrakingDeceleration = 500.0f; // Standard walking is usually 2048.0f
+	float SlideBrakingDeceleration = 500.0f;
 
-	/** The boost impulse. MW2019 has a sharp initial burst. */
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Sliding")
 	float SlideImpulseAmount = 900.0f;
 
-	/** The camera shake to play when the slide begins */
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Sliding")
 	TSubclassOf<class UCameraShakeBase> SlideCameraShakeClass;
+
+	void SetMeshVisibility();
+	void SetWeaponVisibility(AWeapon* WeaponToAttach);
+	void PlayAnimOnMesh(USkeletalMeshComponent* TargetMesh, UAnimSequence* Anim);
 };

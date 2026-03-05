@@ -28,10 +28,12 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Animation|Playback")
 	UAnimSequence* CurrentIdleAnimation;
 
-	/** * NOTE: 'bIsFiring' is REMOVED intentionally.
-	 * With Dynamic Montages, we don't use a boolean to play fire anims anymore.
-	 * The C++ code in PlayerCharacter pushes the animation directly when you click.
-	 */
+	// --- IK VARIABLES ---
+	UPROPERTY(BlueprintReadOnly, Category = "Animation|IK")
+	FTransform IKLeftHandTransform;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Animation|IK")
+	float IKLeftHandAlpha; // 0.0 = No IK, 1.0 = IK
 
 	 // --- MOVEMENT DATA (For AnimGraph) ---
 	UPROPERTY(BlueprintReadOnly, Category = "Animation|Movement")
@@ -47,6 +49,9 @@ public:
 	bool bIsSliding;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Animation|State")
+	bool bIsAiming;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Animation|State")
 	bool bIsInAir;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Animation|State")
@@ -58,6 +63,9 @@ public:
 
 	UPROPERTY(BlueprintReadOnly, Category = "Animation|Aiming")
 	float AimYaw;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Recoil")
+	FTransform VisualRecoilTransform;
 
 private:
 	UPROPERTY()
