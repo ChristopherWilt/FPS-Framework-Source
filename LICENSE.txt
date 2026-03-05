@@ -1,0 +1,7 @@
+Copyright (c) 2026 Christopher Wilt. All Rights Reserved.
+
+This repository and its source code are provided strictly for portfolio review, educational viewing, and employment evaluation purposes.
+
+No permission is granted to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of this software in any capacity. 
+
+This framework is a proprietary commercial product currently in development for release on the Unreal Engine Marketplace. All core architecture, implementations, and algorithms remain the exclusive intellectual property of the copyright holder.
