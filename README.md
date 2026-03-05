@@ -6,6 +6,9 @@ Modular C++ FPS Framework for Unreal Engine 5. Implements Epic Online Services (
 **Engine:** Unreal Engine 5.4  
 **Language:** C++  
 
+> ⚠️ **LEGAL & USAGE NOTICE**
+> This repository is strictly a **Portfolio Showcase** for employment evaluation. The code within is proprietary and all rights are reserved. You may not use, copy, or distribute this code for personal or commercial projects. This framework is currently being finalized for a commercial release on the Unreal Engine Marketplace.
+
 ## Overview
 A modular First-Person Shooter framework engineered to serve as a scalable foundation for competitive multiplayer games. This project integrates Epic Online Services (EOS) with EIK for peer-to-peer matchmaking, lobby management, and secure user identity management. 
 
