@@ -13,6 +13,7 @@ Modular C++ FPS Framework for Unreal Engine 5. Implements Epic Online Services (
 A modular First-Person Shooter framework engineered to serve as a scalable foundation for competitive multiplayer games. This project integrates Epic Online Services (EOS) with EIK for peer-to-peer matchmaking, lobby management, and secure user identity management. 
 
 **Note:** This repository contains **source code only**.
+The project was originally strictly a search and destroy shooter i wanted to create, however realizing the opportunity at hand, i moved towards an all around Multiplayer FPS Framework, the files are still labeled as SnD FPS, this will be changed when i get closer to the release!
 
 ---
 
